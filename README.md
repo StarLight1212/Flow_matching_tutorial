@@ -58,8 +58,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ----------------------------
 # 1) 速度场网络 v_theta(x,t)
-# 输入: x_t (B,1,28,28), t (标量或(B,1))
-# 输出: 与 x 形状相同的速度场
 # ----------------------------
 class TimeEmbedding(nn.Module):
     def __init__(self, dim=128):
@@ -69,11 +67,10 @@ class TimeEmbedding(nn.Module):
             nn.Linear(dim, dim), nn.SiLU(),
             nn.Linear(dim, dim)
         )
-    def forward(self, t):  # t in [0,1]
-        # 四ier风格位置编码
+    def forward(self, t):  # t in [0,1], shape (B,)
         half = self.dim // 2
         freqs = torch.exp(torch.linspace(math.log(1.), math.log(1000.), steps=half, device=t.device))
-        angles = 2*math.pi* t[:,None]*freqs[None,:]
+        angles = 2*math.pi * t[:, None] * freqs[None, :]
         emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
         return self.mlp(emb)
 
@@ -90,46 +87,42 @@ class SmallUNet(nn.Module):
         self.out2 = nn.Conv2d(ch, 1, 3, padding=1)
 
     def forward(self, x, t):
-        # t: (B,)
-        temb = self.time_mlp(t)                # (B, time_dim)
-        temb = temb[:, :, None, None]          # (B, C, 1, 1)
-
+        temb = self.time_mlp(t)[:, :, None, None]  # (B,C,1,1)
         h1 = F.silu(self.in1(x))
         h1 = F.silu(self.in2(h1))
         d  = F.silu(self.down(h1))
-
-        m  = F.silu(self.mid1(d + temb))       # 简单注入t
-
+        m  = F.silu(self.mid1(d + temb))           # 简单注入t
         u  = F.silu(self.up(m))
         u  = torch.cat([u, h1], dim=1)
         u  = F.silu(self.out1(u))
-        v  = self.out2(u)                      # 速度场形状=输入形状
+        v  = self.out2(u)
         return v
 
 # ----------------------------
 # 2) 直线流训练数据管道
 # ----------------------------
-def get_dataloaders(batch_size=128):
-    tfm = transforms.Compose([
-        transforms.ToTensor(),  # [0,1]
-        transforms.Lambda(lambda x: x*2-1.0)  # [-1,1]
+def get_dataloaders(batch_size=128, num_workers=2):
+    tmf = transforms.Compose([
+        transforms.ToTensor(),                 # [0,1]
+        transforms.Normalize([0.5], [0.5])     # -> [-1,1]  (x-0.5)/0.5 = 2x-1
     ])
-    train = datasets.MNIST(root='./data', train=True, download=True, transform=tfm)
-    return DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+    train = datasets.MNIST(root='./data', train=True, download=True, transform=tmf)
+    # NOTE: if you still see spawn issues, set num_workers=0 as a fallback.
+    return DataLoader(train, batch_size=batch_size, shuffle=True,
+                      num_workers=num_workers, drop_last=True, pin_memory=torch.cuda.is_available())
 
 # ----------------------------
-# 3) 训练一步：采样x,z,t → 构造(x_t, target=x-z) → MSE
+# 3) 训练一步
 # ----------------------------
 def train_epoch(model, opt, dl):
     model.train()
     total = 0.0
     for x,_ in dl:
-        x = x.to(device)  # (B,1,28,28), in [-1,1]
-        z = torch.randn_like(x)                # 噪声
-        t = torch.rand(x.size(0), device=device)  # U[0,1]
-
+        x = x.to(device)                        # (B,1,28,28) in [-1,1]
+        z = torch.randn_like(x)
+        t = torch.rand(x.size(0), device=device)  # (B,)
         x_t = (1 - t)[:,None,None,None] * z + t[:,None,None,None] * x
-        target_v = x - z                       # 直线流目标速度
+        target_v = x - z
 
         pred_v = model(x_t, t)
         loss = F.mse_loss(pred_v, target_v)
@@ -139,7 +132,7 @@ def train_epoch(model, opt, dl):
     return total / (len(dl.dataset))
 
 # ----------------------------
-# 4) 生成：Euler 积分 NFE 步
+# 4) 生成
 # ----------------------------
 @torch.no_grad()
 def sample(model, n=64, nfe=8):
@@ -150,14 +143,15 @@ def sample(model, n=64, nfe=8):
         v  = model(x, t0)
         dt = 1.0 / nfe
         x  = x + v * dt
-    x = (x.clamp(-1,1)+1)/2.0  # 回到[0,1]
+    x = (x.clamp(-1,1)+1)/2.0
     return x
+
 
 # ----------------------------
 # 5) 主程序
 # ----------------------------
 def main():
-    dl = get_dataloaders(256)
+    dl = get_dataloaders(256, num_workers=2)
     model = SmallUNet().to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
 
@@ -168,8 +162,10 @@ def main():
         imgs = sample(model, n=64, nfe=8)
         utils.save_image(imgs, f'samples/e{epoch:02d}.png', nrow=8)
 
+
 if __name__ == "__main__":
     main()
+
 ```
 
 **你应该看到**：训练几轮后，`samples/` 下会逐渐出现像 MNIST 的数字；`nfe=1` 也能生成可辨数字，但 4–8 步更稳。
