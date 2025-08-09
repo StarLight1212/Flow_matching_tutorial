@@ -7,9 +7,7 @@ flow-matching（FM）算是近两年生成建模里最“爽脆”的路线之�
 
 * **训练法则（Flow Matching）**：先选一条“几何上舒服”的**概率路径** $p_t(x)$ 把噪声和数据连接起来，然后最小化
 
-  $$
-  \mathbb{E}\big[ \|v_\theta(X_t,t) - u_t(X_t)\|^2 \big],
-  $$
+  $\mathbb{E}\big[ \|v_\theta(X_t,t) - u_t(X_t)\|^2 \big],$
 
   其中 $u_t$ 是这条路径的**真速度**（或其条件期望），$X_t\sim p_t$。
 
